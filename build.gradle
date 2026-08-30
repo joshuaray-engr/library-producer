@@ -38,3 +38,11 @@ dependencies {
 tasks.named('test') {
 	useJUnitPlatform()
 }
+
+// Only the executable Spring Boot jar (bootJar) is needed; disabling the
+// plain jar avoids two "*-SNAPSHOT.jar" files in build/libs, which would
+// otherwise make the Dockerfile's COPY glob ambiguous.
+tasks.named('jar') {
+	enabled = false
+}
+

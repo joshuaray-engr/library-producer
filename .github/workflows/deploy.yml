@@ -1,0 +1,113 @@
+name: Deploy to Amazon ECR
+
+# Builds the library-producer Docker image and pushes it to AWS ECR.
+#
+# Required repository configuration:
+#   Variables (Settings > Secrets and variables > Actions > Variables):
+#     AWS_REGION        - e.g. us-east-2
+#     ECR_REPOSITORY    - e.g. library-producer
+#   Secrets:
+#     AWS_ROLE_TO_ASSUME - IAM role ARN with ECR push permissions, trusted for
+#                          GitHub OIDC (recommended, no long-lived keys).
+#                          See: https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-amazon-web-services
+#
+# If you'd rather use static credentials instead of OIDC, replace the
+# "Configure AWS credentials" step below with aws-access-key-id /
+# aws-secret-access-key inputs sourced from secrets.
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required to fetch the OIDC token for AWS role assumption
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'library-producer' }}
+
+jobs:
+  test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run tests
+        # Uses the embedded Kafka broker (see application-test.properties /
+        # @EmbeddedKafka) - no dependency on the remote AWS Kafka cluster.
+        run: ./gradlew test --console=plain --no-daemon
+
+  build-and-push:
+    name: Build & Push Docker Image to ECR
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image-meta.outputs.image }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" \
+            --region "${{ env.AWS_REGION }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --region "${{ env.AWS_REGION }}" \
+            --image-scanning-configuration scanOnPush=true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Compute image tags
+        id: image-meta
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          SHA_TAG="${REGISTRY}/${{ env.ECR_REPOSITORY }}:${GITHUB_SHA::8}"
+          LATEST_TAG="${REGISTRY}/${{ env.ECR_REPOSITORY }}:latest"
+          echo "sha_tag=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+          echo "latest_tag=${LATEST_TAG}" >> "$GITHUB_OUTPUT"
+          echo "image=${SHA_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image-meta.outputs.sha_tag }}
+            ${{ steps.image-meta.outputs.latest_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          echo "### Pushed image" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ steps.image-meta.outputs.sha_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ steps.image-meta.outputs.latest_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+

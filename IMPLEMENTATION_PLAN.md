@@ -84,6 +84,31 @@ the remote AWS cluster. `./gradlew clean build` verified green end-to-end.
 
 ---
 
+## Phase 1.5 — Containerization & ECR Image Publishing (✅ Done)
+
+Goal: package the service as a portable Docker image and automatically
+publish it to AWS ECR on every merge to `main`, per PRD §8.6.
+
+| # | Task | Status | Notes |
+|---|---|---|---|
+| 1.5.1 | Multi-stage `Dockerfile` (JDK build stage / JRE runtime stage, non-root user) | ✅ | `eclipse-temurin:25-jdk-jammy` → `eclipse-temurin:25-jre-jammy` |
+| 1.5.2 | Fix ambiguous jar output (`*-SNAPSHOT.jar` matching both bootJar and the plain jar) | ✅ | Disabled the plain `jar` task in `build.gradle` so only the executable jar remains in `build/libs/` |
+| 1.5.3 | `.dockerignore` to keep build context small | ✅ | Excludes `build/`, `.gradle/`, `.git/`, docs, IDE files |
+| 1.5.4 | `deploy.yml` — test gate + OIDC AWS auth + ECR login + build/push | ✅ | Two jobs: `test` (gates on `./gradlew test`) → `build-and-push` (assumes IAM role via OIDC, ensures repo exists, builds & pushes via `docker/build-push-action` with GHA layer caching) |
+| 1.5.5 | Tag pushed images with both Git SHA and `latest` | ✅ | `steps.image-meta` computes both tags from the ECR registry + `GITHUB_SHA` |
+| 1.5.6 | Document required repo configuration (variables/secrets) | ✅ | `AWS_REGION`, `ECR_REPOSITORY` (vars); `AWS_ROLE_TO_ASSUME` (secret) - documented in `deploy.yml` header comment and PRD §8.6 |
+
+**Exit criteria (met):** Pushing to `main` runs tests, then builds and
+pushes a Docker image to ECR tagged with the commit SHA and `latest`, using
+short-lived OIDC credentials (no static AWS keys in GitHub Secrets).
+
+**Not yet done (tracked in Phase 2 / PRD §12):** nothing automatically
+*deploys* the new image to a running environment (ECS/EKS) - `deploy.yml`
+only builds and publishes it; and ECR scan-on-push findings aren't yet used
+to gate the pipeline.
+
+---
+
 ## Phase 2 — Production Hardening (⬜ Not started)
 
 Goal: close the gaps flagged in PRD §11 Risks that block real (non-playground)
@@ -100,6 +125,8 @@ use.
 | 2.7 | Structured JSON logging (for log aggregation) instead of default console pattern | Eng | Logs parseable by ELK/CloudWatch |
 | 2.8 | Rate limiting / basic abuse protection on the two endpoints | Eng | Configurable requests/sec threshold returns `429` beyond limit |
 | 2.9 | Infra-as-code for topic provisioning (Terraform/Ansible) as the long-term source of truth, superseding the app-managed `NewTopic` bean for prod | Infra | Topic config reproducible without running the app |
+| 2.10 | Automate runtime deployment after image publish (ECS service update / EKS rollout / Helm) | Infra | New image in ECR results in an actually-running updated service, not just a published artifact |
+| 2.11 | Gate `deploy.yml` on ECR image scan findings (fail on HIGH/CRITICAL CVEs) | Eng | Pipeline fails before a vulnerable image can be pulled/deployed |
 
 **Exit criteria:** Service can be exposed outside a trusted network boundary
 without violating the risks called out in PRD §11.

@@ -50,6 +50,10 @@ independently while still staying in sync with the source of truth.
   scope for v1.
 - Consumer-side processing of the published events is out of scope for this
   document (tracked separately as `library-consumer`).
+- Actual deployment/orchestration onto a running container platform (ECS
+  task definitions, EKS manifests, etc.) is out of scope for v1 - this
+  document only covers building and publishing the image to ECR. Runtime
+  deployment is tracked as a follow-up (see §12).
 
 ## 4. Target Users
 
@@ -67,6 +71,7 @@ independently while still staying in sync with the source of truth.
 | US-3 | API consumer | receive clear validation errors | I can fix malformed requests quickly |
 | US-4 | Platform engineer | see structured logs of publish success/failure | I can debug and monitor message delivery |
 | US-5 | Developer | run the service locally with a single command | I can develop and test without a shared Kafka cluster |
+| US-6 | Platform engineer | have every push to `main` automatically build and push a Docker image to ECR | deployable artifacts are always available without a manual build step |
 
 ## 6. Functional Requirements
 
@@ -167,7 +172,7 @@ independently while still staying in sync with the source of truth.
 | **Performance** | Async publish path should not block the HTTP response beyond request validation. |
 | **Reliability** | Failed publishes must be logged with enough detail (key, value, exception) to support manual replay/inspection. |
 | **Observability** | Structured logs for every publish attempt (success and failure). |
-| **Portability** | Runnable locally via Docker Compose (single-broker KRaft-mode Kafka). |
+| **Portability** | Runnable locally via Docker Compose (single-broker KRaft-mode Kafka); packaged as a portable Docker image (multi-stage build) published to AWS ECR on every merge to `main`. |
 | **Maintainability** | Layered structure: `domain`, `producer`, `controller`. |
 | **Configuration** | Kafka bootstrap servers, serializers, and topic name externalized via `application.properties`. |
 
@@ -183,6 +188,10 @@ independently while still staying in sync with the source of truth.
   level.
 - **Validation**: Jakarta Bean Validation (Hibernate Validator)
 - **Boilerplate reduction**: Lombok
+- **Containerization**: Docker (multi-stage build, `eclipse-temurin:25-jdk`
+  build stage / `eclipse-temurin:25-jre` runtime stage)
+- **CI/CD**: GitHub Actions (`.github/workflows/ci.yml` for tests,
+  `.github/workflows/deploy.yml` to build & push the image to AWS ECR)
 
 ### 8.2 Package Structure
 
@@ -239,6 +248,59 @@ empty/documented for reference only.
 - Topic auto-creation is enabled on the remote cluster, so
   `library-events` is created on first publish if it doesn't already exist.
 
+### 8.6 Containerization & Deployment (AWS ECR)
+
+**Dockerfile** (multi-stage build):
+1. **Build stage** (`eclipse-temurin:25-jdk-jammy`) — copies the Gradle
+   wrapper and build files first (for layer caching), then sources, and runs
+   `./gradlew bootJar -x test` (tests run separately in CI, not inside the
+   image build).
+2. **Runtime stage** (`eclipse-temurin:25-jre-jammy`) — copies only the
+   built executable jar, runs as a non-root `spring` user, exposes port
+   `8080`.
+3. `.dockerignore` excludes `build/`, `.gradle/`, `.git/`, docs, and IDE
+   files to keep the build context small.
+
+> **Note**: The Spring Boot Gradle plugin normally also produces a
+> non-executable "plain" jar (`*-SNAPSHOT-plain.jar`) alongside the
+> executable `bootJar` output. Since both match a `*-SNAPSHOT.jar` glob,
+> the plain jar is disabled in `build.gradle` (`tasks.named('jar') { enabled
+> = false }`) so the Dockerfile's `COPY` step unambiguously picks up the
+> single executable jar.
+
+**CI/CD pipeline** (GitHub Actions):
+- `.github/workflows/ci.yml` — runs `./gradlew build` (unit + web-slice +
+  embedded-Kafka integration tests) on every push/PR to `main`. No AWS
+  credentials required (uses the embedded Kafka broker, not the real
+  cluster).
+- `.github/workflows/deploy.yml` — on every push to `main` (or a `v*` tag, or
+  manual dispatch):
+  1. **`test` job** — re-runs `./gradlew test` as a gate before building the
+     image (fails fast, avoids pushing a broken image).
+  2. **`build-and-push` job** (needs `test`):
+     - Assumes an AWS IAM role via **GitHub OIDC**
+       (`aws-actions/configure-aws-credentials`) — no long-lived AWS access
+       keys stored in GitHub Secrets.
+     - Logs in to ECR (`aws-actions/amazon-ecr-login`).
+     - Ensures the target ECR repository exists (idempotent
+       `describe-repositories` / `create-repository` with image scanning
+       enabled on push).
+     - Builds and pushes the image via `docker/build-push-action`, tagged
+       with both the short Git SHA and `latest`, using GitHub Actions layer
+       caching (`cache-from`/`cache-to: type=gha`).
+
+**Required GitHub repository configuration:**
+
+| Type | Name | Example / Notes |
+|---|---|---|
+| Variable | `AWS_REGION` | `us-east-2` (defaults to this if unset) |
+| Variable | `ECR_REPOSITORY` | `library-producer` (defaults to this if unset) |
+| Secret | `AWS_ROLE_TO_ASSUME` | IAM role ARN trusted for GitHub's OIDC provider, with `ecr:*` push permissions scoped to the target repository |
+
+Deploying the image to a running environment (ECS service update, EKS
+rollout, etc.) is intentionally **out of scope** for `deploy.yml` — it only
+builds and publishes the artifact; see §12 for the follow-up.
+
 ## 9. Configuration Reference
 
 | Property | Default | Description |
@@ -261,6 +323,8 @@ empty/documented for reference only.
 - **0** unhandled exceptions surfaced to API clients for validation failures
   (all validation errors return structured `400` responses).
 - Local onboarding time (clone → running service + Kafka) under **5 minutes**.
+- **100%** of merges to `main` result in a successfully built and pushed
+  Docker image in ECR, tagged with both the Git SHA and `latest`.
 
 ## 11. Risks & Open Questions
 
@@ -272,6 +336,9 @@ empty/documented for reference only.
 | No authentication on endpoints | Acceptable for internal/dev use; must be addressed before production exposure. |
 | Topic auto-creation relies on broker config | Verified working against the remote `playground-cluster` (auto-creates `library-events` on first publish); production Kafka clusters typically disable this — must be handled via infra-as-code before go-live. |
 | Kafka cluster exposed on public EC2 DNS with plaintext (PLAINTEXT) listeners | Credentials/data are not encrypted in transit and there is no broker-side authentication (SASL/mTLS) or network ACLs beyond the security group; anyone who can reach the EC2 host on ports 9092–9094 can produce/consume. Acceptable for a playground/dev cluster only — must move to SASL_SSL + private networking (VPC/VPN) before handling real data. |
+| `deploy.yml` only builds/pushes the image; nothing deploys it | There is currently no ECS/EKS/other runtime target wired up to consume the new image automatically; someone (or another pipeline) must still trigger a deployment/rollout after the image lands in ECR. |
+| ECR image scanning is enabled but findings aren't gated | `create-repository` enables `scanOnPush`, but the workflow doesn't currently fail the pipeline on HIGH/CRITICAL CVE findings — vulnerable images can still be pushed and pulled. |
+| OIDC IAM role permissions not defined in this repo | `AWS_ROLE_TO_ASSUME` must be provisioned out-of-band (Terraform/console) with least-privilege ECR push permissions scoped to the specific repository; not yet codified as infra-as-code. |
 
 ## 12. Future Enhancements (Out of Scope for v1)
 
@@ -282,4 +349,9 @@ empty/documented for reference only.
 - Idempotent producer configuration (`enable.idempotence=true`) and
   exactly-once delivery semantics.
 - Health/metrics endpoints (Spring Boot Actuator) for production readiness.
+- Runtime deployment automation (ECS service update / EKS rollout / Helm
+  chart) triggered after the image lands in ECR, so `deploy.yml` results in
+  an actually-running updated service rather than just a published image.
+- Fail the CI/CD pipeline on HIGH/CRITICAL ECR image scan findings instead of
+  only enabling scan-on-push informationally.
 
