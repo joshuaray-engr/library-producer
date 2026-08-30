@@ -21,10 +21,6 @@ on:
     tags: [ "v*" ]
   workflow_dispatch: {}
 
-permissions:
-  id-token: write   # required to fetch the OIDC token for AWS role assumption
-  contents: read
-
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY || 'library-producer' }}
