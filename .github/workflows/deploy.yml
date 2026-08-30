@@ -29,6 +29,8 @@ jobs:
   test:
     name: Build & Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,8 +55,8 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write   # Allows requesting the OIDC JWT token from GitHub
-      contents: read    # Allows checking out code
+      id-token: write   # Mandated for fetching the OIDC JWT token context
+      contents: read    # Mandated for code checkout
 
     outputs:
       image: ${{ steps.image-meta.outputs.image }}
@@ -67,6 +69,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActionsECRDeploySession
 
       - name: Login to Amazon ECR
         id: login-ecr
