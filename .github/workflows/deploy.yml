@@ -55,6 +55,11 @@ jobs:
     name: Build & Push Docker Image to ECR
     needs: test
     runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write   # Allows requesting the OIDC JWT token from GitHub
+      contents: read    # Allows checking out code
+
     outputs:
       image: ${{ steps.image-meta.outputs.image }}
     steps:
