@@ -1,5 +1,0 @@
-# Kafka is hosted remotely on AWS EC2 (playground-cluster: kafka-broker-1/2/3),
-# reachable via ec2-18-223-60-27.us-east-2.compute.amazonaws.com:9092/9093/9094.
-# See spring.kafka.producer.bootstrap-servers in application.properties.
-# No local Kafka broker is needed for this project.
-services: {}
